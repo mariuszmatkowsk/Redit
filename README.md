@@ -1,1 +1,1 @@
-* Vim like editor for educational purpose
+# Vim like editor for educational purpose
