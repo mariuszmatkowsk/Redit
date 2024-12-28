@@ -20,8 +20,8 @@ enum EditorMode {
 }
 
 struct Cursor {
-    x: u16,
-    y: u16,
+    x: usize,
+    y: usize,
 }
 
 impl Cursor {
@@ -33,11 +33,11 @@ impl Cursor {
         self.x = self.x.saturating_sub(1);
     }
 
-    fn move_right(&mut self, boundary: u16) {
+    fn move_right(&mut self, boundary: usize) {
         self.x = std::cmp::min(boundary, self.x + 1);
     }
 
-    fn move_down(&mut self, boundary: u16) {
+    fn move_down(&mut self, boundary: usize) {
         self.y = std::cmp::min(boundary, self.y + 1);
     }
 
@@ -54,7 +54,7 @@ impl Cursor {
         unimplemented!();
     }
 
-    fn get_position(&self) -> (u16, u16) {
+    fn get_position(&self) -> (usize, usize) {
         (self.x, self.y)
     }
 }
@@ -78,6 +78,7 @@ enum Action {
     ClearShortuctBuffer,
     BackspaceInInsertMode,
     EnterInsertModeInNewLine,
+    RemoveCursorChar,
 }
 
 struct Editor {
@@ -116,14 +117,14 @@ impl Editor {
     }
 
     fn generate_editor_space(&mut self) -> io::Result<()> {
-        let (cx, cy) = self.cursor.get_position();
+        let (c_col, c_row) = self.cursor.get_position();
 
         let mut is_cursor_drawed = false;
 
         for (row, line) in self.lines.iter().enumerate() {
             queue!(self.stdout, MoveTo(0, row as u16))?;
             for (col, c) in line.chars().enumerate() {
-                if !is_cursor_drawed && (cx as usize, cy as usize) == (col, row) {
+                if !is_cursor_drawed && (c_col, c_row) == (col, row) {
                     queue!(self.stdout, SetBackgroundColor(Color::Blue))?;
                     queue!(self.stdout, SetForegroundColor(Color::Black))?;
                     queue!(self.stdout, Print(c))?;
@@ -134,7 +135,7 @@ impl Editor {
                 }
             }
 
-            if row == cy as usize && !is_cursor_drawed {
+            if row == c_row && !is_cursor_drawed {
                 queue!(self.stdout, SetBackgroundColor(Color::Blue))?;
                 queue!(self.stdout, Print(" "))?;
                 is_cursor_drawed = true;
@@ -150,8 +151,8 @@ impl Editor {
         queue!(self.stdout, SetForegroundColor(Color::White))?;
         queue!(self.stdout, MoveTo(0, self.rows - 2))?;
 
-        let (pos_x, _) = position()?;
-        let n: usize = self.columns as usize - pos_x as usize;
+        let (c_col, _) = position()?;
+        let n: usize = self.columns as usize - c_col as usize;
 
         queue!(self.stdout, SetBackgroundColor(Color::DarkGrey))?;
         queue!(self.stdout, SetForegroundColor(Color::White))?;
@@ -160,13 +161,13 @@ impl Editor {
         queue!(self.stdout, SetBackgroundColor(Color::DarkGrey))?;
         queue!(self.stdout, SetForegroundColor(Color::White))?;
         queue!(self.stdout, MoveTo(self.columns - 20, self.rows - 2))?;
-        let (pos_x, pos_y) = self.cursor.get_position();
+        let (c_col, c_row) = self.cursor.get_position();
         queue!(
             self.stdout,
             Print(format!(
                 "{line},{column}",
-                line = pos_y + 1,
-                column = pos_x + 1
+                line = c_row + 1,
+                column = c_col + 1
             ))
         )?;
 
@@ -227,35 +228,43 @@ fn main() -> Result<(), Box<dyn Error>> {
                 Action::EnterInsertMode => editor.mode = EditorMode::Insert,
                 Action::EnterInsertModeNext => {
                     editor.mode = EditorMode::Insert;
-                    editor.cursor.move_right(u16::MAX);
+                    editor.cursor.move_right(usize::MAX);
                 }
                 Action::EnterInsertModeInNewLine => {
-                    let (_, row) = editor.cursor.get_position();
-                    if row as usize == editor.lines.len() - 1 {
+                    let (_, c_row) = editor.cursor.get_position();
+                    if c_row == editor.lines.len() - 1 {
                         editor.lines.push(String::new());
                     } else {
-                        editor.lines.insert(row as usize + 1, String::new());
+                        editor.lines.insert(c_row + 1, String::new());
                     }
 
                     editor.mode = EditorMode::Insert;
-                    editor.cursor.move_down(u16::MAX);
-
+                    editor.cursor.move_down(usize::MAX);
                 }
                 Action::EnterVisualMode => {
                     if editor.mode == EditorMode::Command {
                         editor.command.clear();
+                    }
+                    if editor.mode == EditorMode::Insert {
+                        let (c_col, c_row) = editor.cursor.get_position();
+
+                        if let Some(line) = editor.lines.get(c_row) {
+                            if line.len() == c_col {
+                                editor.cursor.move_left();
+                            }
+                        }
                     }
                     editor.mode = EditorMode::Visual;
                 }
                 Action::EnterCommandMode => editor.mode = EditorMode::Command,
                 Action::MoveCursorLeft => editor.cursor.move_left(),
                 Action::MoveCursorRight => {
-                    let (_, cy) = editor.cursor.get_position();
-                    if let Some(line) = editor.lines.get(cy as usize) {
+                    let (_, c_row) = editor.cursor.get_position();
+                    if let Some(line) = editor.lines.get(c_row) {
                         if line.len() == 0 {
                             editor.cursor.move_right(0);
                         } else {
-                            editor.cursor.move_right(line.len() as u16 - 1);
+                            editor.cursor.move_right(line.len() - 1);
                         }
                     }
                 }
@@ -264,29 +273,29 @@ fn main() -> Result<(), Box<dyn Error>> {
                     if rows == 1 {
                         editor.cursor.move_down(0);
                     }
-                    editor.cursor.move_down(rows as u16 - 1);
+                    editor.cursor.move_down(rows - 1);
                 }
                 Action::MoveCursorUp => editor.cursor.move_up(),
                 Action::EnterCommandChar(c) => editor.command.push(c),
                 Action::ExecuteCommand => editor.execute_command(),
                 Action::EnterChar(c) => {
-                    let (x, y) = editor.cursor.get_position();
-                    if let Some(line) = editor.lines.get_mut(y as usize) {
+                    let (c_col, c_row) = editor.cursor.get_position();
+                    if let Some(line) = editor.lines.get_mut(c_row) {
                         if line.is_empty() {
                             line.push(c);
-                            editor.cursor.move_right(u16::MAX)
-                        } else if x > line.len() as u16 {
+                            editor.cursor.move_right(usize::MAX)
+                        } else if c_col > line.len() {
                             line.push(c);
-                            editor.cursor.move_right(u16::MAX)
+                            editor.cursor.move_right(usize::MAX)
                         } else {
-                            line.insert(x as usize, c);
-                            editor.cursor.move_right(u16::MAX)
+                            line.insert(c_col, c);
+                            editor.cursor.move_right(usize::MAX)
                         }
                     }
                 }
                 Action::NewLine => {
                     editor.lines.push(String::new());
-                    editor.cursor.move_down(u16::MAX);
+                    editor.cursor.move_down(usize::MAX);
                 }
                 Action::AppendShortcutChar(c) => {
                     editor.shortcut_buffer.push(c);
@@ -304,24 +313,44 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                             if editor.lines.len() > 1 {
                                 editor.lines.remove(c_row as usize);
-                            } 
+                            }
                             editor.shortcut_buffer.clear();
                         }
                         _ => {}
                     }
                 }
                 Action::BackspaceInInsertMode => {
-                    let (c_row, c_col) = editor.cursor.get_position();
+                    let (c_col, c_row) = editor.cursor.get_position();
 
                     if c_col == 0 && c_row != 0 {
-                        if let Some(line) = editor.lines.get_mut(c_col as usize) {
+                        if let Some(line) = editor.lines.get_mut(c_row) {
                             if line.is_empty() {
-                                editor.lines.remove(c_col as usize);
+                                editor.lines.remove(c_row);
+                            } else {
+                                // move line content to line above
                             }
                         };
+                    } else if c_col > 0 {
+                        let char_index_to_remove = c_col - 1;
+                        if let Some(line) = editor.lines.get_mut(c_row) {
+                            line.remove(char_index_to_remove);
+                            editor.cursor.move_left();
+                        }
                     }
                 }
                 Action::ClearShortuctBuffer => editor.shortcut_buffer.clear(),
+                Action::RemoveCursorChar => {
+                    let (c_col, c_row) = editor.cursor.get_position();
+
+                    if let Some(line) = editor.lines.get_mut(c_row) {
+                        if !line.is_empty() {
+                            line.remove(c_col);
+                            if c_col == line.len() {
+                                editor.cursor.move_left();
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -362,6 +391,7 @@ fn handle_visual_mode_event(event: &Event) -> Action {
             KeyCode::Char('l') => Action::MoveCursorRight,
             KeyCode::Char('j') => Action::MoveCursorDown,
             KeyCode::Char('k') => Action::MoveCursorUp,
+            KeyCode::Char('x') => Action::RemoveCursorChar,
             KeyCode::Char(c) => Action::AppendShortcutChar(c),
             _ => Action::Unknown,
         },
